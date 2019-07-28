@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -9,13 +10,18 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE PolyKinds #-}
 
 module Lib where
 
 import Protolude
 import GHC.Generics
--- import qualified Data.Text as T
 import qualified Data.Generics as G
+import Data.Type.Equality (type (==))
+
+
+import qualified Data.Set as S
+import qualified Data.Map.Strict as M
 
 
 data ConfigF a b c = Config { clients :: [ClientF a]
@@ -35,154 +41,166 @@ newtype EncrText = EncrText { unEncrText :: Text } deriving (Show, G.Data)
 
 type ConfigResolved = ConfigF Password Url EncrText
 
-change :: ConfigResolved -> ConfigResolved
-change c = G.everywhere (G.mkT (chgPwd "...")) .
-           G.everywhere (G.mkT (chgUrl "---")) $ c
-
-changeM :: MonadState Int m => ConfigResolved -> m ConfigResolved
-changeM c = do
-  G.everywhereM (G.mkM (chgPwdM "---")) $ c
-
-chgPwd :: Text -> Password -> Password
-chgPwd text (Password x) = Password $ text <> x
-
-chgPwdM :: MonadState Int m => Text -> Password -> m Password
-chgPwdM text (Password x) = do
-  modify (+1)
-  v <- get
-  pure $ Password $ text <> " " <> show v <> " " <> x
-
-chgUrl :: Text -> Url -> Url
-chgUrl text (Url x) = Url $ text <> x
-
-config :: ConfigResolved
-config = Config { clients =
-                  [ Client $ Password "pwd1"
-                  ]
-                , services = [ Service (Password "pwd2") (Url "url1")]
-                , key = Key $ EncrText "klucz"
-                }
-
-
-data Tree a = Leaf a | Node (Tree a) (Tree a)
-  deriving (Generic, Show, G.Data)
-
-type TreeInt = Tree Int
-
-t :: TreeInt
-t = Leaf 3
-
-go :: IO ()
-go = do
-  putText $ show $ G.everywhere (\x -> x) t
-  putText "End"
-
-
-  putText "===> End"
-
-incrV :: Int -> TreeInt -> TreeInt
-incrV x = G.everywhere (G.mkT (incL x))
-
-incL :: Int -> TreeInt -> TreeInt
-incL v (Leaf x) = Leaf $ v + x
-incL v (Node l r) = Node (incL v l) (incL v r)
+type ConfigInitial = ConfigF Text Text Text
 
 -------------------------------------------------------------------------------
 -------------------------------------------------------------------------------
--------------------------------------------------------------------------------
--------------------------------------------------------------------------------
--------------------------------------------------------------------------------
 
-class DoJob s a where
-  doJob :: Applicative g => (a -> g a) -> s -> g s
+class TypeTraversable s t a b where
+  typeTraverse :: Applicative g => (a -> g b) -> s -> g t
 
-instance ( Generic s
-         , GDoJob (Rep s) a
-         ) => DoJob s a where
-  doJob f s = to <$> gDoJob f (from s)
-  -- param = trace "confusing" $ confusing (\f s -> toN <$> gparam @n f (fromN s))
-
-class GDoJob s a where
-  gDoJob :: forall g (x :: Type) . Applicative g => (a -> g a) -> s x -> g (s x)
-
-instance (GDoJob l a, GDoJob r a) => GDoJob (l :*: r) a where
-  gDoJob f (l :*: r) = (:*:) <$> gDoJob f l <*> gDoJob f r
-
-instance (GDoJob l a, GDoJob r a) => GDoJob (l :+: r) a where
-  gDoJob f (L1 l) = L1 <$> gDoJob f l
-  gDoJob f (R1 r) = R1 <$> gDoJob f r
-
-instance GDoJob s a => GDoJob (M1 m meta s) a where
-  gDoJob f (M1 x) = M1 <$> gDoJob f x
-
-instance GDoJob U1 a where
-  gDoJob _ x = pure x
-
-instance {-# OVERLAPPING #-} (Show a, DoJob (h (g (f a))) a)
-      => GDoJob (K1 R (h (g (f a)))) a where
-  gDoJob f (K1 xs) = K1 <$> doJob f xs
-
-instance {-# OVERLAPPING #-} (Show a, DoJob (g (f a)) a) => GDoJob (K1 R (g (f a))) a where
-  gDoJob f (K1 xs) = trace (("Found [[a]] in " :: Text)) $ -- <> show xs) $
-                     K1 <$> doJob f xs
-
--- WITH SHOW:
--- instance {-# OVERLAPPABLE #-} (Show a, DoJob [a] a) => GDoJob (K1 R [a]) a where
---   gDoJob f (K1 xs) = trace (("Found [a] in " :: Text) <> show xs) $
---     let z = doJob f xs
---         z' = K1 <$> z
---     in z'
-instance {-# OVERLAPPING #-} (Show (f a), DoJob (f a) a)
-      => GDoJob (K1 R (f a)) a where
-  gDoJob f (K1 xs) = trace (("Found [a] in [" :: Text) <> show xs) $
-                     K1 <$> doJob f xs
-
-type family IfTypesEq (t1 :: Type) (t2 :: Type) :: Bool where
-  IfTypesEq a a = 'True
-  IfTypesEq _ _ = 'False
+instance (Generic s, Generic t, GTypeTraversable (Rep s) (Rep t) a b)
+      => TypeTraversable s t a b where
+  typeTraverse f s = to <$> gTypeTraverse f (from s)
 
 
--- instance {-# OVERLAPPING #-} (Show a) => GDoJob (K1 R a) b where
---   gDoJob f (K1 x) = K1 <$> pure x -- K1 <$> f x
-instance {-# OVERLAPPING #-} (Show a, teq ~ (IfTypesEq a b),  GDoJobRec teq (K1 R a) b)
-       => GDoJob (K1 R a) b where
-  -- gDoJob f (K1 x) = K1 <$> pure x -- K1 <$> f x
-  gDoJob f (K1 x) = gDoJobRec (Proxy :: Proxy teq) f (K1 x)
-    -- panic $ "Found int type equal type in " <> show x
+class GTypeTraversable s t a b where
+  gTypeTraverse :: forall g (x :: Type) . Applicative g
+                => (a -> g b) -> s x -> g (t x)
 
-class GDoJobRec (t :: Bool) s a where
-  gDoJobRec :: forall g (x :: Type) . Applicative g => Proxy t -> (a -> g a) -> s x -> g (s x)
+instance (GTypeTraversable l l' a b, GTypeTraversable r r' a b)
+      => GTypeTraversable (l :*: r) (l' :*: r') a b where
+  gTypeTraverse f (l :*: r) = (:*:) <$> gTypeTraverse f l <*> gTypeTraverse f r
 
-instance (a ~ b) => GDoJobRec 'True (K1 R a) b where
-  gDoJobRec _ f (K1 x) = K1 <$> f x
+instance (GTypeTraversable l l' a b, GTypeTraversable r r' a b)
+      => GTypeTraversable (l :+: r) (l' :+: r') a b where
+  gTypeTraverse f (L1 l) = L1 <$> gTypeTraverse f l
+  gTypeTraverse f (R1 r) = R1 <$> gTypeTraverse f r
 
-instance GDoJobRec 'False (K1 R a) b where
-  gDoJobRec _ _ (K1 x) = K1 <$> pure x
+instance GTypeTraversable s t a b
+      => GTypeTraversable (M1 m meta s) (M1 m meta t) a b where
+  gTypeTraverse f (M1 x) = M1 <$> gTypeTraverse f x
+
+instance GTypeTraversable U1 U1 a b where
+  gTypeTraverse _ _ = pure U1
+
+instance {-# OVERLAPPING #-}
+         TypeTraversable (f3 (f2 (f1 a))) (g3 (g2 (g1 b))) a b
+      => GTypeTraversable (K1 R (f3 (f2 (f1 a)))) (K1 R (g3 (g2 (g1 b)))) a b where
+
+  gTypeTraverse f (K1 xs) = K1 <$> typeTraverse f xs
+
+instance {-# OVERLAPPING #-}
+     TypeTraversable (f2 (f1 a)) (g2 (g1 b)) a b
+  => GTypeTraversable (K1 R (f2 (f1 a))) (K1 R (g2 (g1 b))) a b where
+
+  gTypeTraverse f (K1 xs) = K1 <$> typeTraverse f xs
+
+instance {-# OVERLAPPING #-}
+         TypeTraversable (f a) (g b) a b
+      => GTypeTraversable (K1 R (f a)) (K1 R (g b)) a b where
+  
+  gTypeTraverse f (K1 xs) = K1 <$> typeTraverse f xs
+
+instance {-# OVERLAPPING #-}
+         (teq ~ (a == a'), GTypeTraversableRec teq (K1 R a) (K1 R b) a' b')
+      => GTypeTraversable (K1 R a) (K1 R b) a' b' where
+  gTypeTraverse f v = gTypeTraverseRec (Proxy :: Proxy teq) f v
+
+class GTypeTraversableRec (p :: Bool) s t a b where
+  gTypeTraverseRec :: forall g (x :: Type) . Applicative g
+                   => Proxy p -> (a -> g b) -> s x -> g (t x)
+
+instance GTypeTraversableRec 'True (K1 R a) (K1 R b) a b where
+  gTypeTraverseRec _ f (K1 x) = K1 <$> f x
+
+instance GTypeTraversableRec 'False s s a b where
+  gTypeTraverseRec _ _ s = pure s
+
+------------------------------------------------------------------------------- 
 
 newtype MyText = MyText { unText :: Text } deriving Show
 instance Monoid MyText where
   mempty = MyText mempty
   MyText t1 `mappend` MyText t2 = MyText $ t1 <> t2
 
-go2 :: IO ()
-go2 = do
-  let res = (traverseOf (doJob @_ @MyText) (\x -> pure $ (MyText "==> ") <> x) <=<
-             traverseOf (doJob @_ @Int) (pure . succ)) mt
-  putText . show =<< res
+-- data MT a b = MT [[a]] b deriving (Show, Generic)
 
--- data MT a = MT [[a]] deriving (Show, Generic)
--- data MT a = MT [[Maybe a]] [[a]] a [Text] deriving (Show, Generic)
+-- mt :: MT Int MyText
+-- mt = MT [[1..3], [31 .. 35]] (MyText "Wania")
+-- mt = MT (S.singleton 1) (MyText "Wania")
+
+-- -- data MT a = MT [[a]] deriving (Show, Generic)
+-- -- data MT a = MT [[Maybe a]] [[a]] a [Text] deriving (Show, Generic)
 data MT a b = MT { aofa :: [[Maybe a]]
                  , as :: [[a]]
                  , v :: a
                  , name :: [Text]
                  , myText :: MyText
+                 , mp :: Map Text a
+                 , bParam :: b
                  } deriving (Show, Generic)
-
 mt :: MT Int [Text]
 -- mt = MT [[1 ..3 ], [10..11]]
-mt = MT [[Just 1, Just 10, Nothing]] [[1 ..3], [30 ..35]] 997 ["xxx"] (MyText "Wania")
+mt = MT
+  [[Just 1, Just 10, Nothing]]
+  [[1 ..3], [30 ..35]]
+  997
+  ["xxx"]
+  (MyText "Wania")
+  (M.fromList [("k1", 1313)])
+  []
+
+
+
+go3 :: IO ()
+go3 = do
+  -- let res :: IO (MT Text) =
+  --       -- (traverseOf (typeTraverse @_ @_ @MyText) (\x -> pure $ (MyText "==> ") <> x)) <=<
+  --        (traverseOf typeTraverse incM) $ mt
+  -- res' <- res
+  -- putText $ show res'
+  -- -- let res'' :: IO (MT Int) =
+  -- --       (traverseOf (typeTraverse @_ @_ @MyText) (\x -> pure $ (MyText "==> ") <> x)) res'
+
+  -- -- putText . show =<< res''
+  -- let res4 :: IO (MT Text) = (traverseOf typeTraverse chgeMyTextM) $ res'
+  -- putText . show =<< res4
+
+  --let z = conv2 <=< conv1 $ mt
+  let z = conv1 $ mt
+
+  putText . show =<< z
+
+-- conv1 :: MT Int a -> IO (MT Text a)
+conv1 :: MT Int [Text] -> IO (MT Text [Text])
+conv1 = traverseOf typeTraverse incM
+
+conv2 :: MT Text MyText -> IO (MT Text MyText)
+conv2 = traverseOf typeTraverse chgeMyTextM
+
+incM :: Int -> IO Text
+incM = pure . show . succ
+
+chgeMyTextM :: MyText -> IO MyText
+chgeMyTextM x = pure $ MyText "==> " <> x <> MyText " <=="
+
+-- -- data MT a = MT [[a]] deriving (Show, Generic)
+-- -- data MT a = MT [[Maybe a]] [[a]] a [Text] deriving (Show, Generic)
+-- data MT a b = MT { aofa :: [[Maybe a]]
+--                  , as :: [[a]]
+--                  , v :: a
+--                  , name :: [Text]
+--                  , myText :: MyText
+--                  } deriving (Show, Generic)
+
+-- mt :: MT Int [Text]
+-- -- mt = MT [[1 ..3 ], [10..11]]
+-- mt = MT [[Just 1, Just 10, Nothing]] [[1 ..3], [30 ..35]] 997 ["xxx"] (MyText "Wania")
 
 
 traverseOf :: a -> a
 traverseOf = identity
+
+data Nested a = Nested { setOfA :: Map Text a } deriving (Functor, Foldable, Traversable)
+
+instance Ord k => Generic (Map k v) where
+  type Rep (Map k v) = Rep [(k, v)]
+  from = from . M.toList
+  to = M.fromList . to
+  
+instance Ord a => Generic (Set a) where
+  type Rep (Set a) = Rep [a]
+  from = from . S.toList
+  to = S.fromList . to
+
