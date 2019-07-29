@@ -10,7 +10,8 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE PolyKinds #-}
+-- {-# LANGUAGE PolyKinds #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Lib where
 
@@ -24,29 +25,57 @@ import qualified Data.Set as S
 import qualified Data.Map.Strict as M
 
 
-data ConfigF a b c = Config { clients :: [ClientF a]
-                            , services :: [ServiceF a b]
-                            , key :: KeyF c
-                            } deriving (Show, G.Data)
+-- data ConfigF a b c = Config { clients :: [ClientF a]
+--                             , services :: [ServiceF a b]
+--                             , key :: KeyF c
+--                             } deriving (Show, Generic, G.Data)
 
-data ClientF a = Client { passwd :: a } deriving (Show, G.Data)
+data ConfigF a b c = Config { clients :: ClientF a
+                            , services :: ServiceF a b
+                            , key :: KeyF c
+                            } deriving (Show, Generic, G.Data)
+
+data ClientF a = Client { passwd :: a } deriving (Show, Generic, G.Data)
 data ServiceF a b = Service { passwd :: a
                             , url :: b
-                            } deriving (Show, G.Data)
-data KeyF c = Key { key :: c } deriving (Show, G.Data)
+                            } deriving (Show, Generic, G.Data)
+
+data KeyF c = Key { key :: c } deriving (Show, Generic, G.Data)
 
 newtype Password = Password { unPassword :: Text } deriving (Show, G.Data)
 newtype Url = Url { unUrl :: Text } deriving (Show, G.Data)
 newtype EncrText = EncrText { unEncrText :: Text } deriving (Show, G.Data)
 
-type ConfigResolved = ConfigF Password Url EncrText
+newtype Password2 = Password2 { unPassword2 :: Text } deriving (Show, G.Data)
+newtype Url2 = Url2 { unUrl2 :: Text } deriving (Show, G.Data)
+newtype EncrText2 = EncrText2 { unEncrText2 :: Text } deriving (Show, G.Data)
 
-type ConfigInitial = ConfigF Text Text Text
+type ConfigResolved = ConfigF Password2 Url2 EncrText2
+
+type ConfigInitial = ConfigF Password Url EncrText
+
+trv1 :: ConfigF Password Url EncrText -> IO (ConfigF Password2 Url EncrText)
+trv1 conf = typeTraverse rPassword conf
+
+trv2 :: ConfigF Password Url EncrText -> IO (ConfigF Password Url2 EncrText)
+trv2 conf = typeTraverse rUrl conf
+
+rPassword :: Password -> IO Password2
+rPassword = pure . Password2 . (\x -> "***" <> x <> "***") . unPassword
+
+rUrl :: Url -> IO Url2
+rUrl = pure . Url2 . (\x -> "+" <> x <> "+") . unUrl
+
+c :: ConfigInitial
+c = Config { clients = Client (Password "Wania")
+           , services = Service (Password "Bania") (Url "http")
+           , key = Key (EncrText "secret")
+           }
 
 -------------------------------------------------------------------------------
 -------------------------------------------------------------------------------
 
-class TypeTraversable s t a b where
+class TypeTraversable (s :: Type) (t :: Type) (a :: Type) (b :: Type) where
   typeTraverse :: Applicative g => (a -> g b) -> s -> g t
 
 instance (Generic s, Generic t, GTypeTraversable (Rep s) (Rep t) a b)
@@ -54,7 +83,7 @@ instance (Generic s, Generic t, GTypeTraversable (Rep s) (Rep t) a b)
   typeTraverse f s = to <$> gTypeTraverse f (from s)
 
 
-class GTypeTraversable s t a b where
+class GTypeTraversable (s :: Type -> Type) (t :: Type -> Type) (a :: Type) (b :: Type) where
   gTypeTraverse :: forall g (x :: Type) . Applicative g
                 => (a -> g b) -> s x -> g (t x)
 
@@ -89,13 +118,27 @@ instance {-# OVERLAPPING #-}
 instance {-# OVERLAPPING #-}
          TypeTraversable (f a) (g b) a b
       => GTypeTraversable (K1 R (f a)) (K1 R (g b)) a b where
-  
+
   gTypeTraverse f (K1 xs) = K1 <$> typeTraverse f xs
 
+-- too late here to resolve
 instance {-# OVERLAPPING #-}
          (teq ~ (a == a'), GTypeTraversableRec teq (K1 R a) (K1 R b) a' b')
       => GTypeTraversable (K1 R a) (K1 R b) a' b' where
   gTypeTraverse f v = gTypeTraverseRec (Proxy :: Proxy teq) f v
+
+-- here:
+-------------
+instance {-# OVERLAPPING #-}
+         TypeTraversable (f a o) (f b o) a b
+      => GTypeTraversable (K1 R (f a o)) (K1 R (f b o)) a b where
+  gTypeTraverse f (K1 x) = K1 <$> typeTraverse f x
+
+instance {-# OVERLAPPING #-}
+         TypeTraversable (f a o1 o2) (f b o1 o2) a b
+      => GTypeTraversable (K1 R (f a o1 o2)) (K1 R (f b o1 o2)) a b where
+  gTypeTraverse f (K1 x) = K1 <$> typeTraverse f x
+-------------
 
 class GTypeTraversableRec (p :: Bool) s t a b where
   gTypeTraverseRec :: forall g (x :: Type) . Applicative g
@@ -107,7 +150,7 @@ instance GTypeTraversableRec 'True (K1 R a) (K1 R b) a b where
 instance GTypeTraversableRec 'False s s a b where
   gTypeTraverseRec _ _ s = pure s
 
-------------------------------------------------------------------------------- 
+-------------------------------------------------------------------------------
 
 newtype MyText = MyText { unText :: Text } deriving Show
 instance Monoid MyText where
@@ -198,9 +241,8 @@ instance Ord k => Generic (Map k v) where
   type Rep (Map k v) = Rep [(k, v)]
   from = from . M.toList
   to = M.fromList . to
-  
+
 instance Ord a => Generic (Set a) where
   type Rep (Set a) = Rep [a]
   from = from . S.toList
   to = S.fromList . to
-
